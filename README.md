@@ -284,7 +284,7 @@ compose 里的 `gatus` 用 [Gatus](https://github.com/TwiN/gatus)（Apache-2.0�
 
 本机没有 app 容器，代理走宿主进程环境变量：在启动 `bun dev` 的终端里 `export PROXY_YOUTUBE=http://127.0.0.1:<代理端口>`，其他平台同理，不设全局 `HTTPS_PROXY`。宿主机进程直连本机代理，不需要 `host.docker.internal`。
 
-服务端 app 容器在 `docker compose` 的 app 环境里配同样的四个变量，地址用 `http://host.docker.internal:<电脑代理端口>`：`127.0.0.1` 在容器内指容器自己。修改容器环境变量要重建 app 容器，不属于 Gatus 的 YAML 热加载；应用前确认可以短暂中断解析服务，批准后执行 `docker compose up -d --no-deps --no-build app`。电脑代理退出或休眠时这条出口不可用。YouTube 的媒体链接绑定解析出口 IP，下载需保持同一出口；接通代理不等于启用 `/media` 中转或补齐 Instagram 的 `IG_GRAPHQL_DOC_ID`。
+本机 Clash 开 TUN 时，容器出站已在网络层被接管（实测容器直连的出口 IP 与宿主走代理相同），`docker compose` 起的 app 容器**不要**配 `PROXY_*`：`127.0.0.1` 在容器内指容器自己，配了反而让海外解析全部连不上。只有不走 TUN、必须让容器显式走宿主代理时才在 compose 的 app `environment` 里配 `http://host.docker.internal:<电脑代理端口>`；改完要重建 app 容器，不属于 Gatus 的 YAML 热加载，应用前确认可以短暂中断解析服务，批准后执行 `docker compose up -d --no-deps --no-build app`。电脑代理退出或休眠时这条出口不可用。YouTube 的媒体链接绑定解析出口 IP，下载需保持同一出口；接通代理不等于启用 `/media` 中转或补齐 Instagram 的 `IG_GRAPHQL_DOC_ID`。
 
 ### 升级
 

@@ -16,7 +16,7 @@ storage:
   path: /data/data.db
 
 ui:
-  title: 短视频解析 · 服务状态
+  title: allparse · 服务状态
   header: 各接口与依赖实时可用性
 
 endpoints:
