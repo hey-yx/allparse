@@ -76,6 +76,10 @@ endpoints:
   # 本机通过 GATUS_CONFIG_PATH=/config 读取目录中的全部 YAML；每个样例每小时一次。
   # /parse 正常缓存最长 30 分钟，不把正常 cached=true 误判为故障。
   # 结果检查不等于验证媒体下载，作品删除、权限变化或风控会如实显示失败。
+  # 样例失败先查原因（作品删除、转私密、平台风控），不要为掩盖解析故障换样例。
+  # YouTube 的代理可达与作品可解析是两回事：部分作品要求登录（"Sign in to confirm you're not a bot"），
+  # 是作品级限制；样例选已验证可解析的公开视频，不代表任意链接都能解析。
+  # 小红书样例保留配对的 xsec_token；图片 URL 可能是 HTTP，不算解析失败。
 
   # ── 6. 中转签名 /media：默认关闭 ──
   # 只有配了 PROXY_SECRET 才启用。没配时正确行为是 501 + MEDIA_PROXY_DISABLED，

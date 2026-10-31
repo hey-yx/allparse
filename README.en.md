@@ -14,14 +14,14 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178c6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 [![License](https://img.shields.io/badge/License-Apache%202.0-1f6feb?style=flat-square)](LICENSE)
 
-[Quick Start](#quick-start) • [Architecture](#architecture) • [Platform Status](#platform-status) • [API](#api) • [Observability](#observability) • [Local Development](#local-development) • [Environment Variables](#environment-variables) • [Deployment](#deployment) • [CI](#ci) • [Design Documents](#design-documents)
+[Quick Start](#quick-start) • [Architecture](#architecture) • [Platforms](#platforms) • [API](#api) • [Configuration](#configuration) • [Local Development](#local-development) • [Deployment](#deployment) • [Docs](#docs)
 
 </div>
 
 > [!WARNING]
 > This project is being refactored: APIs and behavior may change at any time. Check the latest implementation before integrating.
 
-Short-video parsing API: give it a share link, get watermark-free video / photo-album direct links back. v2.1 supports 9 platforms: Douyin, Xiaohongshu (RedNote), Kuaishou, Bilibili, Weibo, X/Twitter, YouTube, Instagram Reels and TikTok. The default response is direct links (the client downloads without a Referer header), so the server carries zero bandwidth; the `/media` relay is an optional add-on.
+Short-video parsing API: give it a share link, get watermark-free video / photo-album direct links back. Supports 9 platforms: Douyin, Xiaohongshu (RedNote), Kuaishou, Bilibili, Weibo, X/Twitter, YouTube, Instagram Reels and TikTok. The default response is direct links (the client downloads without a Referer header), so the server carries zero bandwidth; the `/media` relay is an optional add-on.
 
 - One unified JSON envelope for all 9 platforms, direct links with no watermark
 - Pure HTTP primary channels, zero browser dependency by default; browser fallback kicks in on risk control
@@ -33,7 +33,7 @@ Short-video parsing API: give it a share link, get watermark-free video / photo-
 
 ## Quick Start
 
-Prerequisites: [Bun](https://bun.sh) 1.2+. Docker and the Gatus image (`docker pull twinproduction/gatus:stable`) are only needed for the local dashboard.
+Prerequisites: [Bun](https://bun.sh) 1.2+. Docker and the Gatus image (`docker pull twinproduction/gatus:stable`) are only needed for the availability dashboard.
 
 ```bash
 git clone https://github.com/hey-yx/allparse.git
@@ -51,9 +51,7 @@ curl -X POST http://127.0.0.1:7777/parse \
   -d '{"url": "<share link>"}'
 ```
 
-You get the unified envelope (see [API](#api)); `data.assets[].url` is the watermark-free direct link, ready to download (without a Referer). No local setup? Run `docker compose up -d` instead, see [Deployment](#deployment).
-
-More scenarios (picking a quality tier, albums, the YouTube proxy route, error-code handling, rate limits) live in [`docs/调用案例.md`](docs/调用案例.md), Chinese for now.
+You get the unified envelope (see [API](#api)); `data.assets[].url` is the watermark-free direct link, ready to download (without a Referer). No local setup? Run `docker compose up -d` instead, see [Deployment](#deployment). More scenarios (quality tiers, albums, the YouTube relay, error-code handling, rate limits) live in [`docs/调用案例.md`](docs/调用案例.md), Chinese for now.
 
 ## Architecture
 
@@ -61,57 +59,34 @@ Request flow: **match (identify the platform) → cache → dispatch (short-link
 
 ```
 src/
-├── index.ts                  # entry
-├── bootstrap/{app,server}.ts # createApp() (callable directly from tests), listen + graceful shutdown
-├── routes/
-│   ├── parse.routes.ts       # POST|GET /parse (rate limit, cache, metrics)
-│   ├── media.routes.ts       # GET|HEAD /media (optional streaming relay)
-│   └── ops.routes.ts         # /health /ready /platforms /metrics
-├── services/
-│   ├── parse.service.ts      # orchestration: match → cache → dispatch → fetch → parse
-│   ├── cache.ts              # LRU + expiresAt semantics + negative cache + singleflight
-│   ├── limiter.ts            # per-IP token bucket rate limiter
-│   └── media-proxy.ts        # HMAC signing + SSRF allowlist + manual 302 follow + Range passthrough
-├── platforms/                # plugin-style platform layer: adding a platform = add a directory + one registration line in app.ts
-│   ├── douyin/  xhs/  kuaishou/  bilibili/  weibo/  twitter/  youtube/  instagram/  tiktok/
-│   └── registry.ts  hosts.ts
-├── core/                     # error codes, unified envelope, URL utilities
-├── infra/                    # pino logging, metrics, Puppeteer browser gateway
-└── types/platform.ts         # unified data model (MediaAsset / ParseResult / FetchCtx)
+├── bootstrap/    # createApp() (callable directly from tests), listen + graceful shutdown
+├── routes/       # /parse, /media, /health /ready /platforms /metrics
+├── services/     # orchestration: cache (LRU + singleflight), rate limiting, /media relay
+├── platforms/    # plugin-style platform layer: adding a platform = add a directory + one registration line
+├── core/         # error codes, unified envelope, URL utilities
+├── infra/        # pino logging, metrics, Puppeteer browser gateway
+└── types/        # unified data model (MediaAsset / ParseResult / FetchCtx)
 ```
 
 Three hard rules for the platform layer: `platforms/**` never imports Elysia, never reads env, never calls console.log; `parse()` is a pure function (same input, same output) covered by fixture-based offline regression tests; IO goes only through `fetch()` and the injected `FetchCtx`. When a platform changes its pages/APIs, the symptom is "the unit test goes red first", not silently empty results in production.
 
-Tech stack: Bun + Elysia. The only runtime dependencies are elysia, @elysiajs/cors, lru-cache, pino, and puppeteer (needed only on the browser-fallback paths: the Douyin risk-control downgrade and the Xiaohongshu fallback; the pure HTTP primary channels have zero browser dependency).
+Tech stack: Bun + Elysia. The only runtime dependencies are elysia, @elysiajs/cors, lru-cache, pino, and puppeteer (needed only on the browser-fallback paths: the Douyin risk-control downgrade and the Xiaohongshu fallback; the pure HTTP primary channels have zero browser dependency). A full directory tour, the add-a-platform steps and test conventions live in [`docs/开发者指南.md`](docs/开发者指南.md) (Chinese).
 
-## Stability
-
-- **Douyin three-tier downgrade chain (L1 → L2 → L3)**: pure HTTP L1 by default (the signature-free detail API). When L1 is risk-controlled (403 `ArgusSecurityPlugin`), the service first tries L2, a pure HTTP signed channel (standard fingerprint params plus a `uifid` / `timestamp` / `x-secsdk-web-signature` signature and a `ttwid` cookie; the identity is minted automatically by the identity pool, or pinned via `DOUYIN_UIFID`; recipe and measurements in `docs/research/01` §12). Only when L2 also fails (403 / 200 with an empty body) does it fall back to L3, the browser: open the video page and intercept the detail XHR the page itself issues. The `via` field honestly reports `http` / `http-l2` / `browser`, and downgrade counts land in `channel_downgrade_total` (from/to labeled stage by stage as `http-l1`→`http-l2`→`browser`). The L1 risk-control signal (`RISK_CONTROL`) and L2 signature expiry (`UPSTREAM_CHANGED`) are kept apart in both error codes and metrics, so "the door got shut" and "the signature needs a fresh uifid" stay distinguishable.
-- **Sticky circuit breaker**: after 2 consecutive risk-control hits on the HTTP channel, that platform sticks to the browser for 60s instead of eating a 403 plus a cold browser start on every request (saves 1-3s and does not feed the risk profile); when the 60s window ends, one probe request goes back to HTTP, and a success returns the platform to pure HTTP. State is exposed as the `channel_breaker_open{platform}` gauge.
-- **uifid identity pool**: when `DOUYIN_UIFID` is unset, visitor identities are minted automatically and reused from a pool (each uifid is one "visitor"): a suspected-dead identity cools down and gets one retry, then retires and is replaced; minting is globally throttled (60s minimum interval, exponential backoff up to 1h) so that "a burst of new visitors" does not itself become a risk signal. Counts land in `uifid_mint_total` and `uifid_retired_total`.
-- **Risk-control containment window**: when no browser fallback is available (or `BROWSER_FALLBACK=off`), a final risk-control hit puts that platform into a 45s containment window: every request returns 503 immediately instead of hammering upstream (retrying risk control means more risk control); cache hits and negative cache are unaffected. With a fallback available the downgrade is absorbed inside the adapter and no window opens; switching back on voids the window immediately and restores the chain.
-- **Pure-HTTP deployment switch**: `BROWSER_FALLBACK=off` injects no browser capability and reports risk control as an honest 503; suits deployments that would rather not run Chrome (saves 400-600 MB resident memory, puppeteer can be removed).
-- **Transient retries**: `UPSTREAM_TIMEOUT` / `UPSTREAM_ERROR` (network-layer and upstream 5xx) are retried once at the orchestration layer with exponential backoff (500ms→1s), bounded by the 15s request ceiling. `RISK_CONTROL`, content errors and input errors are never retried (retrying risk control means more risk control). Counts land in `parse_retry_total`.
-- **Browser concurrency gate**: all browser channels share one semaphore, at most 2 concurrent pages, the rest queue, and queueing aborts immediately when the request is cancelled (AbortSignal), so concurrency cannot exhaust memory (roughly 30-110 MB per Chrome page).
-- **Honest risk-control classification**: Xiaohongshu error pages such as `error_code=300012` (IP at risk) map to `RISK_CONTROL` (503, human-readable message) instead of posing as an upstream redesign. When a note page returns 200 but only a shell page / empty note data, the service does not jump to "redesign": with a browser available it hands the page to the browser (only the browser can tell a shell page from a deleted note), without one it classifies by the pure HTTP parse; network-layer failures normalize to `UPSTREAM_TIMEOUT` and share the same transient retry as every other platform.
-
-## Platform Status
-
-All 9 platforms produce the same unified `ParseResult` envelope. Channels and capabilities follow each adapter's `capabilities` declaration plus the measured notes under `docs/research/`:
+## Platforms
 
 | Platform | Channel | Content | Quality tiers | Direct link IP-bound |
 |---|---|---|---|---|
-| Douyin | Three-tier downgrade chain: HTTP L1 (signature-free detail API, primary) → L2 pure HTTP signed channel (identity minted automatically when a browser is available, zero config; `DOUYIN_UIFID` pins one) → browser intercepting the detail XHR (last resort); play direct links | Video, photo albums, live photos | Four tiers 540p/720p/1080p/original (plus a 720p watermarked tier) | No (play links download with an empty Referer) |
-| Xiaohongshu (RedNote) | Pure HTTP primary (admitted by the three-header combo, see below) + automatic browser fallback on risk control / login walls | Note videos, album images | Video serves the master stream (h264 preferred); images at original size | No |
-| Kuaishou | Pure HTTP (short-link 302 for the photoId + mobile share page INIT_STATE, zero cookies) | Video, albums | All resolutions the server returns (sorted by height, top tier as the main URL) | No |
-| Bilibili | Pure HTTP (view + playurl try_look=1) | Video (each part becomes an asset), DASH audio/video split | 360P-4K mapped from DASH ids (120=4K, 116=1080P60, 80=1080P…) | No |
-| Weibo | Pure HTTP (anonymous statuses/show JSON; video direct-page fid exchanged for a mid; t.cn short links expanded via 302) | Video, albums | 1080P/720P/480P as served (the component tier list is richer than show) | No |
-| X/Twitter | Pure HTTP (cdn.syndication.twimg.com/tweet-result, token=0, signature-free) | Single-tweet video, GIF, albums | mp4 tiers by bitrate + HLS fallback | No (twimg direct links don't check the egress IP) |
-| YouTube / Shorts | Pure API (innertube /player, automatic ANDROID_VR→IOS client fallback, no PO Token, no cookies) | Video, Shorts | 144p-2160p as returned by the source (ANDROID_VR reaches 4K), DASH audio/video split plus merged tiers | **Yes** (googlevideo direct links are bound to the resolving egress IP, ~6h expiry; download via the `/media` server relay, whose egress must match the resolver's) |
-| Instagram Reels | Pure HTTP (anonymous GraphQL `doc_id` channel, no login/cookies; requires `IG_GRAPHQL_DOC_ID`) | Reels, post and IGTV videos, photo albums | mp4 as returned | No (fbcdn links carry no ip= binding) |
-| TikTok | Pure HTTP (tikwm public API: watermark-free links, albums, music; parsing goes through the egress proxy) | Video, albums, music | Watermark-free play/hdplay tiers | No (tiktokcdn links are not IP-bound) |
+| Douyin | Three-tier downgrade: signature-free detail API → pure HTTP signed channel → browser fallback | Video, photo albums, live photos | Four tiers 540p/720p/1080p/original (plus a 720p watermarked tier) | No (downloads with an empty Referer) |
+| Xiaohongshu (RedNote) | Pure HTTP primary; automatic browser fallback on risk control / login walls | Note videos, album images | Video serves the master stream (h264 preferred); images at original size | No |
+| Kuaishou | Pure HTTP (short-link 302 for the photoId + share-page initial data, zero cookies) | Video, albums | All resolutions the server returns, top tier as the main URL | No |
+| Bilibili | Pure HTTP (view + playurl) | Video (each part becomes an asset), DASH audio/video split | 360P to 4K | No |
+| Weibo | Pure HTTP (anonymous JSON API + video direct-page conversion) | Video, albums | 1080P/720P/480P as served | No |
+| X/Twitter | Pure HTTP (public syndication endpoint, signature-free) | Single-tweet video, GIF, albums | mp4 tiers by bitrate + HLS fallback | No |
+| YouTube / Shorts | Pure API (innertube, automatic client fallback, no PO Token, no cookies) | Video, Shorts | 144p to 2160p (4K), DASH audio/video split plus merged tiers | **Yes** (googlevideo direct links are bound to the resolving egress IP, ~6h expiry; download via the `/media` server relay, whose egress must match the resolver's) |
+| Instagram Reels | Anonymous GraphQL (no login/cookies; requires `IG_GRAPHQL_DOC_ID`) | Reels, Post, IGTV, photo albums | mp4 as returned | No |
+| TikTok | Pure HTTP (tikwm public API) | Video, albums, music | Watermark-free play/hdplay tiers | No |
 
-Proxying: domestic platforms connect directly and never use a proxy; overseas platforms (YouTube etc.) go through the `PROXY_<PLATFORM>` / `HTTPS_PROXY` egress proxy (see [Environment Variables](#environment-variables)).
+How each channel gets through and what the system does automatically after a risk-control hit (downgrades, sticky circuit breaker, containment) are explained in [`docs/详解-原理与使用.md`](docs/详解-原理与使用.md) and [`docs/research/`](docs/research/) (Chinese). The `via` field in every response honestly reports the channel used (`http` / `http-l2` / `browser`). Domestic platforms connect directly and never use a proxy; overseas platforms (YouTube etc.) can use an egress proxy, see [Configuration](#configuration).
 
 ## API
 
@@ -124,7 +99,7 @@ All JSON responses use one unified envelope:
 
 ### POST /parse (or GET /parse?url=)
 
-The main endpoint. `Content-Type: application/json`, body `{"url": "<share link>"}`. Share short links are supported (v.douyin.com, xhslink.com, v.kuaishou.com, b23.tv, t.co, youtu.be, etc., expanded automatically).
+The main endpoint. `Content-Type: application/json`, body `{"url": "<share link>"}`. Share short links are supported (v.douyin.com, xhslink.com, v.kuaishou.com, b23.tv, t.cn, youtu.be, etc., expanded automatically). Repeated parses of the same link hit the cache (at most 30 minutes, or 10 minutes when no resource expiry is known); the top-level `cached` field reports a hit.
 
 `data` (ParseResult) core fields:
 
@@ -134,57 +109,43 @@ The main endpoint. `Content-Type: application/json`, body `{"url": "<share link>
 | `title` / `description` / `tags` / `author` | Metadata |
 | `assets[]` | Resource list, see below |
 | `expiresAt` | Earliest expiry among all direct links (Unix seconds), the basis for caching and re-fetching |
-| `via` | Parsing channel: `http` / `http-l2` (the Douyin signed channel) / `browser` (fetch semantics, uniform across platforms) |
+| `via` | Parsing channel: `http` / `http-l2` (the Douyin signed channel) / `browser` |
 
-`assets[]` (MediaAsset): `type` (video/image/audio/cover), `url` (**direct link**: request it without a Referer header; YouTube is the exception: googlevideo links are bound to the resolving egress IP and must be downloaded through the `/media` server relay), `variants[]` (other qualities of the same asset; Douyin returns all four tiers), `width` / `height` / `durationMs` / `size`, `backups[]` (backup CDNs), `liveClipUrl` (the 5s video of a live photo). Bilibili and YouTube video assets additionally carry `audioUrl` (the DASH audio track, fetch it separately and mux it with the video).
+`assets[]` (MediaAsset): `type` (video/image/audio/cover), `url` (**direct link**: request it without a Referer header; YouTube is the exception, see the table above), `variants[]` (other qualities of the same asset; Douyin returns all four tiers), `width` / `height` / `durationMs` / `size`, `backups[]` (backup CDNs), `liveClipUrl` (the 5s video of a live photo). Bilibili and YouTube video assets additionally carry `audioUrl` (the DASH audio track, fetch it separately and mux it with the video).
 
-Error codes and HTTP status: `INVALID_URL`(400), `UNSUPPORTED_PLATFORM` / `UNSUPPORTED_CONTENT`(422), `CONTENT_NOT_FOUND`(404), `CONTENT_RESTRICTED`(403), `AUTH_REQUIRED`(424), `RISK_CONTROL`(503), `UPSTREAM_ERROR` / `UPSTREAM_CHANGED`(502), `UPSTREAM_TIMEOUT`(504), `RATE_LIMITED`(429), `MEDIA_*` / `CONFIG_MISSING`(501), `INTERNAL`(500). The full table lives in [`docs/调用案例.md`](docs/调用案例.md) §7 (Chinese).
+Error codes and HTTP status: `INVALID_URL`(400), `UNSUPPORTED_PLATFORM` / `UNSUPPORTED_CONTENT`(422), `CONTENT_NOT_FOUND`(404), `CONTENT_RESTRICTED`(403), `AUTH_REQUIRED`(424), `RISK_CONTROL`(503), `UPSTREAM_ERROR` / `UPSTREAM_CHANGED`(502), `UPSTREAM_TIMEOUT`(504), `RATE_LIMITED`(429), `MEDIA_*` / `CONFIG_MISSING`(501), `INTERNAL`(500). What to do for each code lives in [`docs/调用案例.md`](docs/调用案例.md) §7 (Chinese); rate limiting is a per-IP token bucket at 30 requests/minute (behind a reverse proxy, `X-Real-IP` is used), exceeding it returns 429.
 
 ### GET /media?u=&exp=&sig= (optional, off by default)
 
-Streaming relay with three uses: forcing a download filename (Content-Disposition), covering containers that force a Referer (WeChat's built-in browser and the like), and transparent re-fetching after a link expires.
-
-If you call `/parse`, you don't need this endpoint: direct links work as-is with no configuration. It only serves two cases: YouTube links are IP-bound and must go through the server relay (see [Platform Status](#platform-status)), and self-hosters who want any of the three enhancements above.
+A streaming relay. Callers of `/parse` don't need this endpoint: direct links work as-is. It serves two cases: YouTube links are IP-bound and must go through the server relay, and self-hosters who want a forced download filename (the `title` parameter) or to cover containers that force a Referer (WeChat's built-in browser and the like).
 
 > [!NOTE]
 > Set `PROXY_SECRET` to enable (without it the endpoint returns 501; the direct-link main path is unaffected).
 
-- `sig` = first 32 hex chars of HMAC-SHA256(`PROXY_SECRET`, `"<url>\n<exp>"`), valid for 600 seconds; expired → 410, tampered → 403.
+- `sig` = first 32 hex chars of HMAC-SHA256(`PROXY_SECRET`, `"<url>\n<exp>"`), valid for 600 seconds; expired → 410, tampered → 403, with no transparent re-fetch: just `/parse` again for a fresh link. The signing algorithm for rolling your own is in [`docs/调用案例.md`](docs/调用案例.md) §6 (Chinese).
 - Upstream domain allowlist (platform share domains + CDN domains), re-validated on every 302 hop (SSRF protection); concurrency capped at 2; Range / HEAD supported.
 
-### GET /health
+### Ops endpoints
 
-Liveness probe: 200 `{"status":"ok","uptime":...}` as long as the process is alive, without touching external dependencies (so external blips can't trigger a restart storm). Docker HEALTHCHECK hits this.
+`GET /health` liveness probe (200 as long as the process is alive, no external dependencies touched, Docker HEALTHCHECK hits it); `GET /ready` readiness probe (200 only when all platform adapters are registered); `GET /platforms` self-describing registry (names, domains, capability declarations); `GET /metrics` Prometheus text format with `parse_total`, `parse_duration_ms`, `cache_hit_total`, `upstream_error_total`, `channel_downgrade_total`, `parse_retry_total`, `channel_breaker_open`, `uifid_mint_total`, `uifid_retired_total`. Logs are pino structured output, one JSON line per request, with `x-request-id` (echoed in the response header); all log output is deeply redacted: URL query values are masked wholesale (parameter names kept, values become `REDACTED`), Error instances and detail fields are redacted recursively, level controlled by `LOG_LEVEL`. How to read these metrics as channel-health signals lives in [`docs/开发者指南.md`](docs/开发者指南.md) §7 (Chinese).
 
-### GET /ready
+## Configuration
 
-Readiness probe: 200 only when all platform adapters are registered, 503 otherwise.
+All configuration goes through environment variables; `.env.example` is an annotated template:
 
-### GET /platforms
-
-Registered platforms, self-described (name, description, recognized domains, capability declarations).
-
-### GET /metrics
-
-Prometheus text format (hand-rolled renderer, no prom-client):
-
-| Metric | Type | Description |
+| Variable | Default | Description |
 |---|---|---|
-| `parse_total{platform,code}` | counter | Parse count; code is `ok` or a business error code |
-| `parse_duration_ms` | histogram | Parse latency distribution (milliseconds, by platform) |
-| `cache_hit_total` | counter | Cache hit count |
-| `upstream_error_total{platform,reason}` | counter | Upstream failure / risk-control count |
-| `channel_downgrade_total{platform,from,to}` | counter | Automatic channel downgrades (Douyin `http-l1`→`http-l2`→`browser`; Xiaohongshu `http`→`browser`) |
-| `parse_retry_total{platform}` | counter | Transient-error (timeout / 5xx) retry count |
-| `channel_breaker_open{platform}` | gauge | Sticky circuit-breaker state (1 = that platform's HTTP channel is open, traffic pinned to the browser) |
-| `uifid_mint_total{result}` | counter | Douyin uifid mints (`ok` / `fail`; automatic pool minting) |
-| `uifid_retired_total{reason}` | counter | Douyin uifid retirements (`suspect` = used up, `evicted` = pool overflow) |
+| `PORT` | 7777 | Listen port |
+| `LOG_LEVEL` | info | fatal/error/warn/info/debug/trace |
+| `BROWSER_FALLBACK` | on | Master switch for the browser fallback; `off` = pure HTTP everywhere, risk control reported as an honest 503 (saves 400-600 MB resident memory) |
+| `DOUYIN_UIFID` | unset | The visitor identity for Douyin's L2 signed channel. Unset → the identity pool mints and reuses one automatically (zero config); set → that identity is pinned, re-minting is covered by `docs/research/01` §12 (Chinese) |
+| `DOUYIN_TTWID` | unset | The `ttwid` for Douyin L2 (optional; most reliable when minted together with `DOUYIN_UIFID`); defaults to registering one automatically |
+| `IG_GRAPHQL_DOC_ID` | unset | The `doc_id` for Instagram's anonymous GraphQL channel; unset → IG links return `CONFIG_MISSING`(501). Instagram rotates this value on releases |
+| `PROXY_SECRET` | unset | Signing secret for the /media relay; unset → /media returns 501 |
+| `PUPPETEER_EXECUTABLE_PATH` | - | Pinned to `/usr/bin/chromium` inside the container (set in the Dockerfile) |
+| `PROXY_<PLATFORM>` / `HTTPS_PROXY` | unset | Per-platform egress proxy (e.g. `PROXY_YOUTUBE`), the former takes priority, the latter is the fallback; domestic platforms are unaffected. In a container deployment, use an address reachable from the container (`127.0.0.1` inside a container means the container itself) |
 
-## Observability
-
-- **Structured logs**: pino, one JSON line per request. Every request generates/propagates `x-request-id` (echoed in the response header, log field `reqId`); access logs carry method, path, status and duration; platform parse events additionally carry platform / id / duration.
-- **Secret scrubbing**: all log output goes through deep redaction: URL query values are masked wholesale (so credentials like `xsec_token` never reach the logs), inline links in message text get the same treatment, and Error instances plus detail fields are redacted recursively. Parameter names are kept; values become `REDACTED`.
-- Log level is controlled by `LOG_LEVEL` (default `info`).
+The production `.env` stays on the server (chmod 600), never in the repo.
 
 ## Local Development
 
@@ -197,37 +158,11 @@ bun run test:status  # one command for the full state: prettier / tsc / tests / 
 bun run typecheck
 ```
 
-Local development needs Bun; Docker and the Gatus image are optional. `bun dev` starts the backend, then tries to bring up the monitoring container: if Docker is down, the image is missing, the port is taken by something else, or the container belongs to another config, it prints one "skipping availability monitoring" line and keeps developing. The dashboard lives at `http://localhost:8080` when the container is up, and a dashboard failure later only stops monitoring, never the backend. Ctrl-C or backend exit stops both, with history kept in the `allparse-gatus-dev-data` volume. Ports come from `PORT` and `GATUS_PORT`.
-
-This repository contains the parser API and the Gatus dashboard, not a separate product frontend. `bun start` runs the backend only and never touches containers. Docker Compose is for server deployment only.
-
-Normal exit and SIGINT/SIGTERM stop the monitor. Force-killing the launcher, power loss or Docker becoming unreachable can leave the container behind: check `docker ps -a --filter name=allparse-gatus-dev` and stop it with `docker stop allparse-gatus-dev`.
-
-> [!TIP]
-> The browser-fallback paths (Douyin risk-control downgrade, Xiaohongshu fallback) need Chrome on the machine (Puppeteer manages it automatically); the pure HTTP channels have no such requirement.
-
-## Environment Variables
-
-| Variable | Default | Description |
-|---|---|---|
-| `PORT` | 7777 | Listen port |
-| `LOG_LEVEL` | info | fatal/error/warn/info/debug/trace |
-| `BROWSER_FALLBACK` | on | Master switch for the browser fallback; `off` = pure HTTP everywhere, risk control reported as an honest 503 (no resident Chrome memory) |
-| `DOUYIN_UIFID` | unset | The `uifid` visitor identity for Douyin's L2 signed channel. Unset → the identity pool mints and reuses one automatically (throttled minting, replaces used-up identities), so L2 works with zero config; set → that identity is pinned, and a dead one must be re-minted per `docs/research/01` §12 |
-| `DOUYIN_TTWID` | unset | The `ttwid` for Douyin L2 (optional; most reliable when minted together with `DOUYIN_UIFID`); defaults to registering one with ttwid.bytedance.com |
-| `IG_GRAPHQL_DOC_ID` | unset | `doc_id` for Instagram's anonymous GraphQL channel; unset → IG links return `CONFIG_MISSING`(501). Instagram rotates this value on releases, so track instaloader / gallery-dl |
-| `PROXY_SECRET` | unset | Signing secret for the /media relay; unset → /media returns 501 |
-| `PUPPETEER_EXECUTABLE_PATH` | - | Pinned to `/usr/bin/chromium` inside the container (set in the Dockerfile) |
-| `PROXY_<PLATFORM>` | unset | Per-platform egress proxy (e.g. `PROXY_YOUTUBE`); highest priority |
-| `HTTPS_PROXY` | unset | Egress-proxy fallback (used when `PROXY_<PLATFORM>` is unset). Resolution order: `PROXY_<PLATFORM>` → `HTTPS_PROXY`; domestic platforms are unaffected (the proxy is injected only into overseas platforms' fetches and the matching `/media` relay) |
-
-See `.env.example`. The production `.env` stays on the server (chmod 600), never in the repo.
+`bun dev` starts the backend, then tries to bring up the monitoring container: if Docker is down, the image is missing or the port is taken, it prints one "skipping availability monitoring" line and keeps developing; force-killing the launcher can leave the monitor container behind (`docker ps -a --filter name=allparse-gatus-dev` to find and stop it). The repo contains the parser API and the Gatus dashboard, not a product frontend; `bun start` runs the backend only. The browser-fallback paths (Douyin risk-control downgrade, Xiaohongshu fallback) need Chrome on the machine (Puppeteer manages it automatically); the pure HTTP channels have no such requirement. CI runs typecheck plus the full test suite on every push / PR, and uploads coverage to Coveralls (badge at the top).
 
 ## Deployment
 
-### Image
-
-Multi-stage build: `oven/bun:alpine` compiles a single binary → `alpine:3.22` + chromium runtime (the browser-fallback paths need a real browser engine). Runs as non-root (uid 10001), tini reaps zombies, HEALTHCHECK hits /health. Measured size: **495MB** on arm64, **527MB** on amd64 (from an initial 830MB); the full slimming breakdown, the post-build acceptance checklist and the apk mirror switch live in `docs/image-build-notes.md`. The apk source defaults to the Aliyun mirror (the official source measured at just 14KB/s); to use the official one: `docker build --build-arg ALPINE_MIRROR=dl-cdn.alpinelinux.org .`
+Multi-stage image build: `oven/bun:alpine` compiles a single binary → `alpine:3.22` + chromium runtime (the browser fallback needs it). Runs as non-root (uid 10001), tini reaps zombies, HEALTHCHECK hits /health. Measured size: **495MB** on arm64, **527MB** on amd64 (slimmed from an initial 830MB); the slimming breakdown and build acceptance live in [`docs/image-build-notes.md`](docs/image-build-notes.md) (Chinese). The apk source defaults to the Aliyun mirror (the official one measured at just 14KB/s); to use the official one: `docker build --build-arg ALPINE_MIRROR=dl-cdn.alpinelinux.org .`
 
 ```bash
 docker build -t allparse:v2 .
@@ -236,66 +171,19 @@ docker run -d --name allparse -p 7777:7777 \
 curl http://127.0.0.1:7777/health
 ```
 
-Or just compose, which starts two services: `app` (the parser) and `gatus` (the monitoring dashboard, see below). `app` gets `restart: unless-stopped`, `mem_limit 800m`, `env_file: .env` and log rotation 10m×3; `gatus` waits until `app` reports healthy:
+Or just compose, which starts two services: `app` (the parser) and `gatus` (a Gatus availability dashboard probing /health, /ready and real parse samples per platform; the check config in `gatus/config.yaml` carries per-item comments, and real samples live in the untracked `gatus/samples.local.yaml`, excluded from both Git and the Docker build context). Host ports default to 7777 (app) and 8080 (gatus); change them if taken.
 
 ```bash
 docker compose up -d
+APP_PORT=7778 GATUS_PORT=8081 docker compose up -d   # different ports
 ```
 
-Host ports default to 7777 (app) and 8080 (gatus). Change them if they are taken:
+Upgrading: rebuild the image, then `docker compose up -d`. Verify `/health`, `/ready` and one real link per platform; rollback is just running the previous image tag.
 
-```bash
-APP_PORT=7778 GATUS_PORT=8081 docker compose up -d
-```
+## Docs
 
-### Monitoring (Gatus)
-
-The `gatus` service in compose runs [Gatus](https://github.com/TwiN/gatus) (Apache-2.0) against the parser. Five basic checks live in `gatus/config.yaml`; checks containing user share links live in untracked `gatus/samples.local.yaml`. Server monitoring targets `http://app:7777`; local `bun dev` uses an independent container to reach the host backend. Both set `GATUS_CONFIG_PATH=/config` to load YAML files from that directory. Monitoring configuration saves reload automatically without a container restart, but the dashboard does not update instantly.
-
-The complete Xiaohongshu share token stays in the local sample file, with mode 600 and exclusions from both Git and the Docker build context. Do not publish that file.
-
-| Display name | Probes | Interval | Conditions |
-|---|---|---|---|
-| `存活检查` | `/health` | 30s | 200, `status == ok`, response < 300ms |
-| `就绪检查` | `/ready` | 60s | 200, `status == ready`, `platforms >= 9` |
-| `平台清单` | `/platforms` | 300s | 200, at least 9 platforms |
-| `抖音签名通道` | `/platforms` | 300s | `data[0]` is douyin, signer `available`, non-empty version |
-| `指标端点` | `/metrics` | 300s | 200, body contains `parse_total`, `upstream_error_total`, `channel_breaker_open`, `channel_downgrade_total` |
-| `抖音·分享短链` / `抖音·精选页` | User-supplied Douyin short link and featured page | 1h | 200, success, matching platform, non-empty assets and HTTP(S) URL |
-| `快手·分享短链` / `快手·桌面分享页` | User-supplied Kuaishou share link and desktop share page | 1h | Same conditions |
-| `B站` / `小红书` | User-supplied Bilibili and Xiaohongshu links | 1h | Same conditions |
-| `微博` / `Twitter` / `YouTube` / `TikTok` / `Instagram` | Public samples | 1h | Same conditions |
-
-The first column is the `name` from the config, which is what the dashboard shows. Gatus keys history by group plus name, so renaming an entry restarts its history from zero.
-
-The minimum count of `9` in `就绪检查` and `平台清单` matches the current adapters. Raise it when adding a platform so missing adapters remain detectable.
-
-Real parsing checks are counted by sample; the two Douyin inputs and the two Kuaishou inputs each identify the same video through different entry points. Kuaishou accepts `/f/<code>`, `/short-video/<photoId>`, `/fw/photo/<photoId>` and `v.kuaishou.com` short links; `/f/<code>` needs one 302 hop to reveal the photoId, and the `m.gifshow.com` landing host is accepted too. Xiaohongshu note links retain their paired `xsec_token`; image URLs may use HTTP, which is not treated as parsing failure.
-
-Successful results are cached for at most 30 minutes, or 10 minutes when no resource expiry is known. Hourly checks normally contact the upstream again, but a recent user request for the same item may populate the cache; `cached == false` is therefore not a health condition. These checks validate parsing, not ongoing media downloads. Deleted or private items and platform risk controls may cause failures; investigate before replacing the sample. YouTube proxy reachability is separate from successful parsing: through the same proxy, some public videos return 200 while others answer "Sign in to confirm you're not a bot", a per-video restriction, so the monitor uses a verified public video and does not claim every YouTube link parses.
-
-The dashboard is at `http://<server>:8080`. History is stored in SQLite in the `gatus-data` volume. When querying `/api/v1/endpoints/statuses`, select the newest result by `timestamp`; the first history item is not necessarily current.
-
-`中转签名（默认关闭）` ships with `enabled: false`. `容器状态` and `证书有效期` remain commented templates; enable them only after choosing the proxy mode, authorizing Docker socket access, or deploying HTTPS, respectively.
-
-Alerting is off by default. To enable it, turn on `alerting.custom` in the config and point the `custom` provider at a WeCom, DingTalk or Feishu bot webhook, passing the URL through an environment variable rather than writing it into the file.
-
-### Local host proxy
-
-Locally there is no app container, so proxies come from the host process environment: export `PROXY_YOUTUBE=http://127.0.0.1:<proxy-port>` in the terminal running `bun dev`, same for the other platforms, and no global `HTTPS_PROXY`. The host process reaches a local proxy directly, so `host.docker.internal` is unnecessary.
-
-When the host runs Clash in TUN mode, container egress is already captured at the network layer (measured: a container's direct egress IP matches the host's proxied egress), so an app container started by `docker compose` must **not** set `PROXY_*`: `127.0.0.1` inside a container means the container itself, and setting them breaks every overseas parse. Only when TUN is off and the container must use the host proxy explicitly, set `http://host.docker.internal:<host-proxy-port>` in the compose app `environment`; environment changes require recreating app (Gatus YAML reloading cannot apply them). After approving the brief parsing interruption, run `docker compose up -d --no-deps --no-build app`. This egress disappears if the host proxy quits or the machine sleeps. YouTube media URLs are bound to the parsing egress IP, so downloads need the same egress. Connecting a proxy does not enable the `/media` relay or supply Instagram's `IG_GRAPHQL_DOC_ID`.
-
-### Upgrading
-
-Rebuild the image, then `docker compose up -d`. Verify `/health`, `/ready` and one real link per platform; rollback is just running the previous image tag. Run `docker image prune` occasionally to clear build cache.
-
-## CI
-
-The repo uses GitHub Actions for continuous integration: on every push to main and every PR, GitHub runs `bun run typecheck` and the full test suite in a clean environment. The CI badge is green when they pass. Tests use real Chromium to read documents, capture XHR responses and wait for cookies, without contacting real platforms. Line coverage is uploaded to Coveralls; the Coverage badge shows the latest successful upload for main, with per-file details one click away. The workflow lives at `.github/workflows/test.yml`: `PUPPETEER_SKIP_DOWNLOAD: "true"` skips the download during dependency installation, then a separate step installs Chrome for the tests.
-
-## Design Documents
-
-- `docs/调用案例.md`: scenario-shaped usage examples: first call, albums, quality tiers, DASH audio/video merging, the YouTube proxy signature, error-code handling, rate limits (Chinese)
-- `docs/research/`: platform API research and measured notes (01 Douyin/TikTok API, 02 domestic platforms, 03 architecture, 04 Xiaohongshu HTTP channel, 05 overseas platforms and the egress proxy)
-- `docs/image-build-notes.md`: image slimming breakdown and build acceptance checklist
+- [`docs/调用案例.md`](docs/调用案例.md): scenario-shaped usage examples: first call, albums, quality tiers, DASH muxing, the YouTube relay signature, error-code handling, rate limits (Chinese)
+- [`docs/详解-原理与使用.md`](docs/详解-原理与使用.md): a long-form explainer for users: what makes each platform hard and how it gets through, the Douyin three-tier downgrade, automatic risk-control handling, config choices, troubleshooting (Chinese)
+- [`docs/开发者指南.md`](docs/开发者指南.md): local development, directory tour, code conventions, add-a-platform steps, test conventions and the maintenance manual (start here before changing code) (Chinese)
+- [`docs/research/`](docs/research/): platform API research and measured notes (01 Douyin/TikTok API, 02 domestic platforms, 03 architecture, 04 Xiaohongshu HTTP channel, 05 overseas platforms and the egress proxy) (Chinese)
+- [`docs/image-build-notes.md`](docs/image-build-notes.md): image slimming breakdown and build acceptance checklist (Chinese)
