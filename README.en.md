@@ -63,7 +63,7 @@ src/
 ├── routes/       # /parse, /media, /health /ready /platforms /metrics
 ├── services/     # orchestration: cache (LRU + singleflight), rate limiting, /media relay
 ├── platforms/    # plugin-style platform layer: adding a platform = add a directory + one registration line
-├── core/         # error codes, unified envelope, URL utilities
+├── core/         # error codes, unified envelope, signer registry, proxied fetch
 ├── infra/        # pino logging, metrics, Puppeteer browser gateway
 └── types/        # unified data model (MediaAsset / ParseResult / FetchCtx)
 ```
@@ -113,7 +113,7 @@ The main endpoint. `Content-Type: application/json`, body `{"url": "<share link>
 
 `assets[]` (MediaAsset): `type` (video/image/audio/cover), `url` (**direct link**: request it without a Referer header; YouTube is the exception, see the table above), `variants[]` (other qualities of the same asset; Douyin returns all four tiers), `width` / `height` / `durationMs` / `size`, `backups[]` (backup CDNs), `liveClipUrl` (the 5s video of a live photo). Bilibili and YouTube video assets additionally carry `audioUrl` (the DASH audio track, fetch it separately and mux it with the video).
 
-Error codes and HTTP status: `INVALID_URL`(400), `UNSUPPORTED_PLATFORM` / `UNSUPPORTED_CONTENT`(422), `CONTENT_NOT_FOUND`(404), `CONTENT_RESTRICTED`(403), `AUTH_REQUIRED`(424), `RISK_CONTROL`(503), `UPSTREAM_ERROR` / `UPSTREAM_CHANGED`(502), `UPSTREAM_TIMEOUT`(504), `RATE_LIMITED`(429), `MEDIA_*` / `CONFIG_MISSING`(501), `INTERNAL`(500). What to do for each code lives in [`docs/调用案例.md`](docs/调用案例.md) §7 (Chinese); rate limiting is a per-IP token bucket at 30 requests/minute (behind a reverse proxy, `X-Real-IP` is used), exceeding it returns 429.
+Error codes and HTTP status: `INVALID_URL`(400), `UNSUPPORTED_PLATFORM` / `UNSUPPORTED_CONTENT`(422), `CONTENT_NOT_FOUND`(404), `CONTENT_RESTRICTED`(403), `AUTH_REQUIRED`(424), `RISK_CONTROL`(503), `UPSTREAM_ERROR` / `UPSTREAM_CHANGED`(502), `UPSTREAM_TIMEOUT`(504), `RATE_LIMITED`(429), `MEDIA_PROXY_DISABLED` / `CONFIG_MISSING`(501), `MEDIA_BAD_SIGNATURE`(403), `MEDIA_LINK_EXPIRED`(410), `INTERNAL`(500). What to do for each code lives in [`docs/调用案例.md`](docs/调用案例.md) §7 (Chinese); rate limiting is a per-IP token bucket at 30 requests/minute (behind a reverse proxy, `X-Real-IP` is used), exceeding it returns 429.
 
 ### GET /media?u=&exp=&sig= (optional, off by default)
 

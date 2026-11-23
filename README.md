@@ -63,7 +63,7 @@ src/
 ├── routes/       # /parse、/media、/health /ready /platforms /metrics
 ├── services/     # 编排：缓存（LRU + singleflight）、限流、/media 中转
 ├── platforms/    # 插件式平台层：加平台 = 加目录 + 注册一行
-├── core/         # 错误码、统一信封、URL 工具
+├── core/         # 错误码、统一信封、签名器注册表、带代理的 fetch 封装
 ├── infra/        # pino 日志、指标、Puppeteer 浏览器网关
 └── types/        # 统一数据模型（MediaAsset / ParseResult / FetchCtx）
 ```
@@ -113,7 +113,7 @@ src/
 
 `assets[]`（MediaAsset）：`type`（video/image/audio/cover）、`url`（**直连地址**，客户端请求时不要带 Referer；YouTube 除外，见上表）、`variants[]`（同资源的其他档位，抖音给全四档）、`width` / `height` / `durationMs` / `size`、`backups[]`（备用 CDN）、`liveClipUrl`（实况照片的 5s 视频）。B 站与 YouTube 视频另带 `audioUrl`（DASH 音轨，需与视频分别拉取后合成）。
 
-错误码与 HTTP 状态：`INVALID_URL`(400)、`UNSUPPORTED_PLATFORM` / `UNSUPPORTED_CONTENT`(422)、`CONTENT_NOT_FOUND`(404)、`CONTENT_RESTRICTED`(403)、`AUTH_REQUIRED`(424)、`RISK_CONTROL`(503)、`UPSTREAM_ERROR` / `UPSTREAM_CHANGED`(502)、`UPSTREAM_TIMEOUT`(504)、`RATE_LIMITED`(429)、`MEDIA_*` / `CONFIG_MISSING`(501)、`INTERNAL`(500)。每个码该怎么办见 [`docs/调用案例.md`](docs/调用案例.md) §7；限流为按 IP 令牌桶 30 次/分钟（反代后用 `X-Real-IP`），超限 429。
+错误码与 HTTP 状态：`INVALID_URL`(400)、`UNSUPPORTED_PLATFORM` / `UNSUPPORTED_CONTENT`(422)、`CONTENT_NOT_FOUND`(404)、`CONTENT_RESTRICTED`(403)、`AUTH_REQUIRED`(424)、`RISK_CONTROL`(503)、`UPSTREAM_ERROR` / `UPSTREAM_CHANGED`(502)、`UPSTREAM_TIMEOUT`(504)、`RATE_LIMITED`(429)、`MEDIA_PROXY_DISABLED` / `CONFIG_MISSING`(501)、`MEDIA_BAD_SIGNATURE`(403)、`MEDIA_LINK_EXPIRED`(410)、`INTERNAL`(500)。每个码该怎么办见 [`docs/调用案例.md`](docs/调用案例.md) §7；限流为按 IP 令牌桶 30 次/分钟（反代后用 `X-Real-IP`），超限 429。
 
 ### GET /media?u=&exp=&sig=（可选，默认关闭）
 
